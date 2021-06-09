@@ -37,11 +37,17 @@ class Image_data:
         x = tf.io.read_file(filename)
         x_decode = tf.image.decode_jpeg(x, channels=self.channels, dct_method='INTEGER_ACCURATE')
         img = tf.image.resize(x_decode, [self.img_height, self.img_width])
+        #img = cv2.imread(filename)
+        #img = cv2.resize(img, (self.img_height, self.img_width)) 
+        #img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = preprocess_fit_train_image(img)
 
         x = tf.io.read_file(filename2)
         x_decode = tf.image.decode_jpeg(x, channels=self.channels, dct_method='INTEGER_ACCURATE')
         img2 = tf.image.resize(x_decode, [self.img_height, self.img_width])
+        #img2 = cv2.imread(filename2)
+        #img2 = cv2.resize(img2, (self.img_height, self.img_width)) 
+        #img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB)
         img2 = preprocess_fit_train_image(img2)
 
         if self.augment_flag :
@@ -94,6 +100,10 @@ def load_images(image_path, img_size, img_channel):
     x = tf.io.read_file(image_path)
     x_decode = tf.image.decode_jpeg(x, channels=img_channel, dct_method='INTEGER_ACCURATE')
     img = tf.image.resize(x_decode, [img_size, img_size])
+    # img = cv2.imread(image_path)
+    # img = cv2.resize(img, (img_size, img_size)) 
+    # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
     img = preprocess_fit_train_image(img)
 
     return img

@@ -40,6 +40,8 @@ class StarGAN_v2():
         self.batch_size = args.batch_size
         self.print_freq = args.print_freq
         self.save_freq = args.save_freq
+        self.max_to_keep = args.max_to_keep
+        self.checkpoint = args.checkpoint
 
         self.img_size = args.img_size
         self.img_ch = args.img_ch
@@ -179,7 +181,7 @@ class StarGAN_v2():
                                             discriminator=self.discriminator,
                                             g_optimizer=self.g_optimizer, e_optimizer=self.e_optimizer, f_optimizer=self.f_optimizer,
                                             d_optimizer=self.d_optimizer)
-            self.manager = tf.train.CheckpointManager(self.ckpt, self.checkpoint_dir, max_to_keep=1)
+            self.manager = tf.train.CheckpointManager(self.ckpt, self.checkpoint_dir, max_to_keep=self.max_to_keep)
             self.start_iteration = 0
 
             if self.manager.latest_checkpoint:
@@ -214,7 +216,12 @@ class StarGAN_v2():
             self.manager = tf.train.CheckpointManager(self.ckpt, self.checkpoint_dir, max_to_keep=1)
 
             if self.manager.latest_checkpoint:
-                self.ckpt.restore(self.manager.latest_checkpoint).expect_partial()
+                restore = self.manager.latest_checkpoint
+                if self.checkpoint:
+                    ind = len(restore.split('-')[-1])
+                    restore = restore[:-ind] + '{}'.format(self.checkpoint)
+                    print('Using Checkpoint {}'.format(restore))
+                self.ckpt.restore(restore).expect_partial()
                 print('Latest checkpoint restored!!')
             else:
                 print('Not restoring from saved checkpoint')
@@ -466,136 +473,34 @@ class StarGAN_v2():
 
         canvas.save(path)
 
+    def latent_sample(self, src_img, dir_name, src_name, src_ext):
+        x_real = tf.expand_dims(src_img[0], axis=0)
+        src_img = postprocess_images(x_real)[0]
+        
+        domain_fix_list = tf.constant([idx for idx in range(self.num_domains)])
+
+        z_trgs = tf.random.normal(shape=[1, self.latent_dim])
+        z_trg = tf.expand_dims(z_trgs[0], axis=0)
+
+        for i, y_trg in enumerate(list(domain_fix_list)):
+            y_trg = tf.reshape(y_trg, shape=[1, 1])
+            s_trg = self.mapping_network_ema([z_trg, y_trg])
+            x_fake = self.generator_ema([x_real, s_trg])
+            x_fake = postprocess_images(x_fake)
+
+            out_img = x_fake[0]
+            out_img = PIL.Image.fromarray(np.uint8(out_img), 'RGB')
+            save_dir = './{}/{}/{}'.format(dir_name, self.checkpoint, i)
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+            out_img.save('{}/{}{}'.format(save_dir, src_name, src_ext))
+
+
     def test(self, merge=True, merge_size=0):
         source_path = os.path.join(self.test_dataset_path, 'src_imgs')
         source_images = glob(os.path.join(source_path, '*.png')) + glob(os.path.join(source_path, '*.jpg'))
         source_images = sorted(source_images)
 
-        # reference-guided synthesis
-        print('reference-guided synthesis')
-        reference_path = os.path.join(self.test_dataset_path, 'ref_imgs')
-        reference_images = []
-        reference_domain = []
-
-        for idx, domain in enumerate(self.domain_list):
-            image_list = glob(os.path.join(reference_path, domain) + '/*.png') + glob(
-                os.path.join(reference_path, domain) + '/*.jpg')
-            image_list = sorted(image_list)
-            domain_list = [[idx]] * len(image_list)  # [ [0], [0], ... , [0] ]
-
-            reference_images.extend(image_list)
-            reference_domain.extend(domain_list)
-
-        if merge:
-            src_img = None
-            ref_img = None
-            ref_img_domain = None
-
-            if merge_size == 0:
-                # [len_src_imgs : len_ref_imgs] matching
-                for src_idx, src_img_path in tenumerate(source_images):
-                    src_name, src_extension = os.path.splitext(src_img_path)
-                    src_name = os.path.basename(src_name)
-
-                    src_img_ = load_images(src_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
-                    src_img_ = tf.expand_dims(src_img_, axis=0)
-
-                    if src_idx == 0:
-                        src_img = src_img_
-                    else:
-                        src_img = tf.concat([src_img, src_img_], axis=0)
-
-                for ref_idx, (ref_img_path, ref_img_domain_) in tenumerate(zip(reference_images, reference_domain)):
-                    ref_name, ref_extension = os.path.splitext(ref_img_path)
-                    ref_name = os.path.basename(ref_name)
-
-                    ref_img_ = load_images(ref_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
-                    ref_img_ = tf.expand_dims(ref_img_, axis=0)
-                    ref_img_domain_ = tf.expand_dims(ref_img_domain_, axis=0)
-
-                    if ref_idx == 0:
-                        ref_img = ref_img_
-                        ref_img_domain = ref_img_domain_
-                    else:
-                        ref_img = tf.concat([ref_img, ref_img_], axis=0)
-                        ref_img_domain = tf.concat([ref_img_domain, ref_img_domain_], axis=0)
-
-                save_path = './{}/ref_all.jpg'.format(self.result_dir)
-
-                self.refer_canvas(src_img, ref_img, ref_img_domain, save_path,
-                                  img_num=[len(source_images), len(reference_images)])
-
-            else:
-                # [merge_size : merge_size] matching
-                src_size = 0
-                for src_idx, src_img_path in tenumerate(source_images):
-                    src_name, src_extension = os.path.splitext(src_img_path)
-                    src_name = os.path.basename(src_name)
-
-                    src_img_ = load_images(src_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
-                    src_img_ = tf.expand_dims(src_img_, axis=0)
-
-                    if src_size < merge_size:
-                        if src_idx % merge_size == 0:
-                            src_img = src_img_
-                        else:
-                            src_img = tf.concat([src_img, src_img_], axis=0)
-                        src_size += 1
-
-                        if src_size == merge_size:
-                            src_size = 0
-
-                            ref_size = 0
-                            for ref_idx, (ref_img_path, ref_img_domain_) in enumerate(
-                                    zip(reference_images, reference_domain)):
-                                ref_name, ref_extension = os.path.splitext(ref_img_path)
-                                ref_name = os.path.basename(ref_name)
-
-                                ref_img_ = load_images(ref_img_path, self.img_size,
-                                                       self.img_ch)  # [img_size, img_size, img_ch]
-                                ref_img_ = tf.expand_dims(ref_img_, axis=0)
-                                ref_img_domain_ = tf.expand_dims(ref_img_domain_, axis=0)
-
-                                if ref_size < merge_size:
-                                    if ref_idx % merge_size == 0:
-                                        ref_img = ref_img_
-                                        ref_img_domain = ref_img_domain_
-                                    else:
-                                        ref_img = tf.concat([ref_img, ref_img_], axis=0)
-                                        ref_img_domain = tf.concat([ref_img_domain, ref_img_domain_], axis=0)
-
-                                    ref_size += 1
-                                    if ref_size == merge_size:
-                                        ref_size = 0
-
-                                        save_path = './{}/ref_{}_{}.jpg'.format(self.result_dir, src_idx + 1, ref_idx + 1)
-
-                                        self.refer_canvas(src_img, ref_img, ref_img_domain, save_path,
-                                                          img_num=merge_size)
-
-        else:
-            # [1:1] matching
-            for src_img_path in tqdm(source_images):
-                src_name, src_extension = os.path.splitext(src_img_path)
-                src_name = os.path.basename(src_name)
-
-                src_img = load_images(src_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
-                src_img = tf.expand_dims(src_img, axis=0)
-
-                for ref_img_path, ref_img_domain in zip(reference_images, reference_domain):
-                    ref_name, ref_extension = os.path.splitext(ref_img_path)
-                    ref_name = os.path.basename(ref_name)
-
-                    ref_img = load_images(ref_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
-                    ref_img = tf.expand_dims(ref_img, axis=0)
-                    ref_img_domain = tf.expand_dims(ref_img_domain, axis=0)
-
-                    save_path = './{}/ref_{}_{}{}'.format(self.result_dir, src_name, ref_name, src_extension)
-
-                    self.refer_canvas(src_img, ref_img, ref_img_domain, save_path, img_num=1)
-
-        # latent-guided synthesis
-        print('latent-guided synthesis')
         for src_img_path in tqdm(source_images):
             src_name, src_extension = os.path.splitext(src_img_path)
             src_name = os.path.basename(src_name)
@@ -603,6 +508,139 @@ class StarGAN_v2():
             src_img = load_images(src_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
             src_img = tf.expand_dims(src_img, axis=0)
 
-            save_path = './{}/latent_{}{}'.format(self.result_dir, src_name, src_extension)
+            self.latent_sample(src_img, self.result_dir, src_name, src_extension)
+        # reference-guided synthesis
+        #print('reference-guided synthesis')
+        #reference_path = os.path.join(self.test_dataset_path, 'ref_imgs')
+        #reference_images = []
+        #reference_domain = []
 
-            self.latent_canvas(src_img, save_path)
+        #for idx, domain in enumerate(self.domain_list):
+        #    image_list = glob(os.path.join(reference_path, domain) + '/*.png') + glob(
+        #        os.path.join(reference_path, domain) + '/*.jpg')
+        #    image_list = sorted(image_list)
+        #    domain_list = [[idx]] * len(image_list)  # [ [0], [0], ... , [0] ]
+
+        #    reference_images.extend(image_list)
+        #    reference_domain.extend(domain_list)
+
+        #if merge:
+        #    src_img = None
+        #    ref_img = None
+        #    ref_img_domain = None
+
+        #    if merge_size == 0:
+        #        # [len_src_imgs : len_ref_imgs] matching
+        #        for src_idx, src_img_path in tenumerate(source_images):
+        #            src_name, src_extension = os.path.splitext(src_img_path)
+        #            src_name = os.path.basename(src_name)
+
+        #            src_img_ = load_images(src_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
+        #            src_img_ = tf.expand_dims(src_img_, axis=0)
+
+        #            if src_idx == 0:
+        #                src_img = src_img_
+        #            else:
+        #                src_img = tf.concat([src_img, src_img_], axis=0)
+
+        #        for ref_idx, (ref_img_path, ref_img_domain_) in tenumerate(zip(reference_images, reference_domain)):
+        #            ref_name, ref_extension = os.path.splitext(ref_img_path)
+        #            ref_name = os.path.basename(ref_name)
+
+        #            ref_img_ = load_images(ref_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
+        #            ref_img_ = tf.expand_dims(ref_img_, axis=0)
+        #            ref_img_domain_ = tf.expand_dims(ref_img_domain_, axis=0)
+
+        #            if ref_idx == 0:
+        #                ref_img = ref_img_
+        #                ref_img_domain = ref_img_domain_
+        #            else:
+        #                ref_img = tf.concat([ref_img, ref_img_], axis=0)
+        #                ref_img_domain = tf.concat([ref_img_domain, ref_img_domain_], axis=0)
+
+        #        save_path = './{}/ref_all.jpg'.format(self.result_dir)
+
+        #        self.refer_canvas(src_img, ref_img, ref_img_domain, save_path,
+        #                          img_num=[len(source_images), len(reference_images)])
+
+        #    else:
+        #        # [merge_size : merge_size] matching
+        #        src_size = 0
+        #        for src_idx, src_img_path in tenumerate(source_images):
+        #            src_name, src_extension = os.path.splitext(src_img_path)
+        #            src_name = os.path.basename(src_name)
+
+        #            src_img_ = load_images(src_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
+        #            src_img_ = tf.expand_dims(src_img_, axis=0)
+
+        #            if src_size < merge_size:
+        #                if src_idx % merge_size == 0:
+        #                    src_img = src_img_
+        #                else:
+        #                    src_img = tf.concat([src_img, src_img_], axis=0)
+        #                src_size += 1
+
+        #                if src_size == merge_size:
+        #                    src_size = 0
+
+        #                    ref_size = 0
+        #                    for ref_idx, (ref_img_path, ref_img_domain_) in enumerate(
+        #                            zip(reference_images, reference_domain)):
+        #                        ref_name, ref_extension = os.path.splitext(ref_img_path)
+        #                        ref_name = os.path.basename(ref_name)
+
+        #                        ref_img_ = load_images(ref_img_path, self.img_size,
+        #                                               self.img_ch)  # [img_size, img_size, img_ch]
+        #                        ref_img_ = tf.expand_dims(ref_img_, axis=0)
+        #                        ref_img_domain_ = tf.expand_dims(ref_img_domain_, axis=0)
+
+        #                        if ref_size < merge_size:
+        #                            if ref_idx % merge_size == 0:
+        #                                ref_img = ref_img_
+        #                                ref_img_domain = ref_img_domain_
+        #                            else:
+        #                                ref_img = tf.concat([ref_img, ref_img_], axis=0)
+        #                                ref_img_domain = tf.concat([ref_img_domain, ref_img_domain_], axis=0)
+
+        #                            ref_size += 1
+        #                            if ref_size == merge_size:
+        #                                ref_size = 0
+
+        #                                save_path = './{}/ref_{}_{}.jpg'.format(self.result_dir, src_idx + 1, ref_idx + 1)
+
+        #                                self.refer_canvas(src_img, ref_img, ref_img_domain, save_path,
+        #                                                  img_num=merge_size)
+
+        #else:
+        #    # [1:1] matching
+        #    for src_img_path in tqdm(source_images):
+        #        src_name, src_extension = os.path.splitext(src_img_path)
+        #        src_name = os.path.basename(src_name)
+
+        #        src_img = load_images(src_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
+        #        src_img = tf.expand_dims(src_img, axis=0)
+
+        #        for ref_img_path, ref_img_domain in zip(reference_images, reference_domain):
+        #            ref_name, ref_extension = os.path.splitext(ref_img_path)
+        #            ref_name = os.path.basename(ref_name)
+
+        #            ref_img = load_images(ref_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
+        #            ref_img = tf.expand_dims(ref_img, axis=0)
+        #            ref_img_domain = tf.expand_dims(ref_img_domain, axis=0)
+
+        #            save_path = './{}/ref_{}_{}{}'.format(self.result_dir, src_name, ref_name, src_extension)
+
+        #            self.refer_canvas(src_img, ref_img, ref_img_domain, save_path, img_num=1)
+
+        ## latent-guided synthesis
+        #print('latent-guided synthesis')
+        #for src_img_path in tqdm(source_images):
+        #    src_name, src_extension = os.path.splitext(src_img_path)
+        #    src_name = os.path.basename(src_name)
+
+        #    src_img = load_images(src_img_path, self.img_size, self.img_ch)  # [img_size, img_size, img_ch]
+        #    src_img = tf.expand_dims(src_img, axis=0)
+
+        #    save_path = './{}/latent_{}{}'.format(self.result_dir, src_name, src_extension)
+
+        #    self.latent_canvas(src_img, save_path)

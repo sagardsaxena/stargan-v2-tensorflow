@@ -59,7 +59,8 @@ def parse_args():
                         help='Directory name to save training logs')
     parser.add_argument('--sample_dir', type=str, default='samples',
                         help='Directory name to save the samples on training')
-
+    parser.add_argument('--max_to_keep', type=int, default=1)
+    parser.add_argument('--checkpoint', type=int, default=None)
     return check_args(parser.parse_args())
 
 
@@ -88,6 +89,10 @@ def check_args(args):
         assert args.batch_size >= 1
     except:
         print('batch size must be larger than or equal to one')
+
+    # --max_to_keep
+    if args.max_to_keep < 0: args.max_to_keep = None
+
     return args
 
 """main"""
